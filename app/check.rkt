@@ -163,7 +163,7 @@
                           [(regexp "^/")
                            (make-url #:path url-string)]
                           [(pregexp "^http[s]{0,1}") url-string]))
-    (define res (get wrapped-url #:stream? true))
+    (define res (head wrapped-url #:stream? true))
     (define response-code (response-status-code res))
     (define response-msg (response-status-message res))
     (response-close! res)
@@ -232,7 +232,9 @@
   
   (for ([u contains-urls])
     (when (not (visited? u))
-      (fprintf (current-error-port) "checking: ~a~n" (url->string u))
+      (fprintf (current-error-port) "[ ~a ] checking: ~a~n"
+               (if (probably-html? u) "HTM" "NOT")
+               (url->string u))
       (cond
         [(check-200? u)
          (hash-set! urls:ok

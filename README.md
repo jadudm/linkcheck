@@ -15,7 +15,7 @@ docker run --rm -it --network="host" jadudm:linkcheck
 To test a remote site:
 
 ```
-docker run --rm -it jadudm:linkcheck --scheme "https" --host "state-officer-md.github.io"
+docker run --rm -it jadudm:linkcheck --https --host "jadud.com"
 ```
 
 When you select the HTTP scheme, the port is automatically set to 443. If you are testing an HTTP URL on a port other than 4000, you should set the port explicitly.
