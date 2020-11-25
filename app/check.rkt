@@ -5,6 +5,8 @@
          net/url
          racket/match
          racket/hash
+         "contract-support.rkt"
+         xml
          )
 
 (provide (all-defined-out))
@@ -35,7 +37,8 @@
 ;; PURPOSE
 ;; Takes a string (like "/info/") and returns a list of path/param elements
 ;; that match that path. If given a list, return it as-is.
-(define (make-path path #:query [query empty])
+(define/contract (make-path path #:query [query empty])
+  (->* (string?) (#:query (listof string?)) (listof path/param?))
   (cond
     [(list? path) path]
     [else
@@ -53,7 +56,7 @@
 ;; This provides a way to create a base, local URL with overrides of specific
 ;; elements of the URL. This is primarily used for building new URLs with new
 ;; paths (from relative anchors in a page) but using the rest of the local URL.
-(define (make-url #:scheme [scheme (local:scheme)]
+(define/contract (make-url #:scheme [scheme (local:scheme)]
                   #:user [user false]
                   #:host [host (local:host)]
                   #:port [port (local:port)]
@@ -61,14 +64,26 @@
                   #:path [path ""]
                   #:query [query empty]
                   #:fragment [fragment false])
+  (->* ()
+       (#:scheme valid-scheme?
+        #:user boolean?
+        #:host string?
+        #:path-absolute? boolean?
+        #:path string?
+        ;; FIXME: Query handling is untested.
+        #:query (listof path/param?)
+        #:fragment boolean?)
+       url?
+       )
   (url scheme user host port path-absolute? (make-path path) query fragment))
 
 ;; CONTRACT
-;; fetch :: url -> x-exp
+;; fetch :: url -> xexpr
 ;; PURPOSE
-;; Returns the content of a URL as an x-exp.
+;; Returns the content of a URL as an xexpr.
 ;; FIXME: Use http-easy instead of net/url here.
-(define (fetch url)
+(define/contract (fetch url)
+  (-> url? xexpr?)
   (log-check-info "fetching: ~a~n" url)
   (cond
     [(probably-html? url)
@@ -83,10 +98,11 @@
     [else '()]))
 
 ;; CONTRACT
-;; anchor->path :: x-expr -> string
+;; anchor->path :: xexpr -> string
 ;; PURPOSE
 ;; Extracts the HREF from an anchor.
-(define (anchor->path xexpr)
+(define/contract (anchor->path xexpr)
+  (-> xexpr? string?)
   (log-check-info "anchor-to-path: ~s~n" xexpr)
   (define attributes
     (filter (λ (o)
@@ -111,19 +127,24 @@
     href))
 
 ;; CONTRACT
-;; convert-url :: (or string? url?) -> url?
+;; convert-url :: string? -> url?
 ;; PURPOSE
 ;; In moving to using URL structs (instead of strings)
 ;; this became a union type input... but, it unifies, and
 ;; makes  sure local paths are full URLs.
-(define (convert-url str)
+(define/contract (convert-url str)
+  (-> string? url?)
   (match str
-    [(? url? str) str]
-    [(regexp "^/")
-     (make-url #:path (make-path str))]
-    [(regexp "^http[s]")
-     (string->url str)]
-    [else (make-url)]))
+    [(pregexp "^/") (make-url #:path str)]
+    [(pregexp "^http[s]{0,1}") (string->url str)]
+    ;; Ignore any internal HREFs.
+    [(pregexp "^#") (make-url)]
+    ;; What if we get an empty string?
+    ["" (make-url)]
+    [else
+     ;; If all else fails, flag it, and return the base URL.
+     (log-check-fail (format "Cannot convert: ~s" str))
+     (make-url)]))
              
 ;; CONTRACT
 ;; extract-urls :: x-expr -> (list-of url?)
@@ -131,7 +152,8 @@
 ;; Takes an x-expr, and walks the document finding all
 ;; of the URLs. Pulls them as strings, and returns them as
 ;; URL structs.
-(define (extract-urls xexpr)
+(define/contract (extract-urls xexpr)
+  (-> xexpr? (listof url?))
   (cond
     [(empty? xexpr) '()]
     ;; Check anchors, CSS/JS, images...
@@ -144,31 +166,31 @@
      (define urls (map extract-urls xexpr))
      (define deduped (remove-duplicates (flatten urls)))
      (define cleaned (filter url? deduped))
-     (define converted (map convert-url cleaned))
-     (when (not (empty? converted))
-       (log-check-info "urls from xexpr: ~a~n" converted))
-     converted]
+     (when (not (empty? cleaned))
+       (log-check-info "urls from xexpr: ~a~n" cleaned))
+     cleaned]
     [else empty]))
 
-;; This is awful.
-(define (get-status-code url)
+;; CONTRACT
+;; get-status-code :: url? -> string?
+;; PURPOSE
+;; Grabs the head from the server for a given URL
+;; and returns a status code. Saves downloading the content.
+(define/contract (get-status-code url)
+  (-> url? number?)
   (define url-string (url->string url))
   (with-handlers ([exn? (λ (e)
                           (log-check-error (format "~s~n" e))
                           999
                           )])
-    (log-check-info (format "checking: ~a~n" url-string))
-    ;; Wrap local URLs appropriately.
+    ;; Expand local paths to full URLs.
     (define wrapped-url (match url-string
                           [(regexp "^/")
                            (make-url #:path url-string)]
                           [(pregexp "^http[s]{0,1}") url-string]))
     (define res (head wrapped-url #:stream? true))
-    (define response-code (response-status-code res))
-    (define response-msg (response-status-message res))
     (response-close! res)
-    (log-check-info (format "status: ~a ~a~n" response-code response-msg))
-    response-code))
+    (response-status-code res)))
 
 ;; CONTRACT
 ;; check-200? :: url -> boolean
@@ -188,7 +210,8 @@
 ;; visited? :: url? -> boolean
 ;; PURPOSE
 ;; Takes a URL and checks to see if we've visited it yet.
-(define (visited? url)
+(define/contract (visited? url)
+  (-> url? boolean?)
   (define key (string->symbol (url->string url)))
   (or (hash-has-key? urls:ok key)
       (hash-has-key? urls:ko key)))
@@ -199,7 +222,8 @@
 ;; If the URL contains the scheme, host, and port
 ;; that we're traversing, then the claim is that it is a local
 ;; URL, and we can fetch the source for deeper traversal.
-(define (local-url? url)
+(define/contract (local-url? url)
+  (-> url? boolean?)
   (and (equal? (local:scheme) (url-scheme url))
        (equal? (local:host) (url-host url))
        (equal? (local:port) (url-port url))))
@@ -209,13 +233,17 @@
 ;; PURPOSE
 ;; Tries to weed out a few of the things most likely to *not*
 ;; be HTML. Things like JS, SVG, etc. Not comprehensive.
-(define (probably-html? url)
+(define/contract (probably-html? url)
+  (-> url? boolean?)
   (not (ormap (λ (end)
                 (regexp-match (format ".*\\.~a" end)
                               (url->string url)))
               PROBABLY-NOT-HTML)))
 
-(define (check url)
+;; PURPOSE
+;; Runs the show.
+(define/contract (linkcheck url)
+  (-> url? void?)
   (log-check-info "--- RUNNING CHECK: ~a~n" (url->string url))
   (define contains-urls
     (cond
@@ -244,7 +272,7 @@
                  (local-url? u)
                  (probably-html? u)
                  (url->string u))
-         (check u)]
+         (linkcheck u)]
         [else (hash-set! urls:ko
                          (string->symbol (string-trim (url->string u)))
                          u)]
@@ -268,7 +296,7 @@
   (local:scheme scheme)
   (local:host host)
   (local:port port)
-  (check (make-url)))
+  (linkcheck (make-url)))
 
 (define (report-csv)
   (printf "url,status~n")
