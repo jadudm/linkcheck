@@ -37,12 +37,6 @@
 (define urls:ko (make-hash))
 (define urls:status (make-hash))
 
-;; A contract to make sure a value is one of two (four) symbols.
-(define ok/c
-  (make-flat-contract #:name 'ok/c
-                      #:first-order
-                      (lambda (s) (member s '(ok ko OK KO)))))
-
 ;; PURPOSE
 ;; Gets the count of good and bad URLs that were found from a run.
 (define/contract (get-count sym)
