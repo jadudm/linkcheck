@@ -5,16 +5,21 @@
          net/url
          racket/match
          racket/hash
-         "contract-support.rkt"
          xml
          )
 
-(provide (all-defined-out))
+(require "contract-support.rkt"
+         "state.rkt")
 
-(define debug? (make-parameter false))
-(define local:scheme (make-parameter "http"))
-(define local:host   (make-parameter "localhost"))
-(define local:port   (make-parameter 4000))
+;; These are the three functions required by the command-line
+;; interface. And, the state (the parameters) that are used to
+;; configure the run. Re-providing maintains contracts.
+(provide
+  start
+  get-count
+  report-json
+  report-csv
+  (all-from-out "state.rkt"))
 
 ;; Logging
 (define-logger check)
@@ -31,6 +36,20 @@
 (define urls:ok (make-hash))
 (define urls:ko (make-hash))
 (define urls:status (make-hash))
+
+;; A contract to make sure a value is one of two (four) symbols.
+(define ok/c
+  (make-flat-contract #:name 'ok/c
+                      #:first-order
+                      (lambda (s) (member s '(ok ko OK KO)))))
+
+;; PURPOSE
+;; Gets the count of good and bad URLs that were found from a run.
+(define/contract (get-count sym)
+  (-> ok/c number?)
+  (case sym
+    [(ok OK) (hash-count urls:ok)]
+    [(ko KO) (hash-count urls:ko)]))
 
 ;; CONTRACT
 ;; make-path :: (or list? string?) -> path/param?
@@ -134,16 +153,17 @@
 ;; makes  sure local paths are full URLs.
 (define/contract (convert-url str)
   (-> string? url?)
-  (match str
-    [(pregexp "^/") (make-url #:path str)]
-    [(pregexp "^http[s]{0,1}") (string->url str)]
+  (define cleaned (string-trim str))
+  (match cleaned
+    [(pregexp "^/") (make-url #:path cleaned)]
+    [(pregexp "^http[s]{0,1}") (string->url cleaned)]
     ;; Ignore any internal HREFs.
     [(pregexp "^#") (make-url)]
     ;; What if we get an empty string?
     ["" (make-url)]
     [else
      ;; If all else fails, flag it, and return the base URL.
-     (log-check-fail (format "Cannot convert: ~s" str))
+     (log-check-error (format "Cannot convert: ~s" str))
      (make-url)]))
              
 ;; CONTRACT
@@ -196,7 +216,8 @@
 ;; check-200? :: url -> boolean
 ;; PURPOSE
 ;; Checks to see if a URL returns a good HTTP response.
-(define (check-200? url)
+(define/contract (check-200? url)
+  (-> url? boolean?)
   (define status-code (get-status-code url))
   (hash-set! urls:status (string->symbol (url->string url)) status-code)
   ;; Either a 2xx response, or a status of #"OK"
@@ -260,9 +281,10 @@
   
   (for ([u contains-urls])
     (when (not (visited? u))
-      (fprintf (current-error-port) "[ ~a ] checking: ~a~n"
-               (if (probably-html? u) "HTM" "NOT")
-               (url->string u))
+      (when (not (quiet?))
+        (fprintf (current-error-port) "[ ~a ] checking: ~a~n"
+                 (if (probably-html? u) "HTM" "NOT")
+                 (url->string u)))
       (cond
         [(check-200? u)
          (hash-set! urls:ok
