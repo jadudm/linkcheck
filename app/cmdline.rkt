@@ -1,5 +1,6 @@
 #lang racket
-(require "linkcheck.rkt")
+(require "linkcheck.rkt"
+         "state.rkt")
 (require racket/cmdline)
 
 ;; This parameter is only used here... so...
@@ -26,6 +27,9 @@
    [("-r" "--report") rpt
                       "Sets report type. Either 'json', 'csv', or 'txt'. Default is 'txt'."
                       (report-type rpt)]
+   [("-a" "--alt-tag-length") al
+                          "Sets minimum ALT tag length. Default is 3 characters."
+                          (alt-tag-length (string->number al))]
    #:args ()
    (start #:scheme (local:scheme) #:port (local:port) #:host (local:host))
    (case (string->symbol (report-type))
@@ -33,11 +37,15 @@
      [(csv) (report-csv)]
      [(txt)
       (when (not (quiet?))
-        (printf "~a good, ~a bad.~n" (get-count 'ok) (get-count 'ko)))
+        (printf "~a good, ~a bad. ~a alt tags missing (of ~a total)~n"
+                (get-count 'ok)
+                (get-count 'ko)
+                (get-alt-count 'ko)
+                (+ (get-alt-count 'ko) (get-alt-count 'ok))))
       ])
    ;; Use the "bad" url count as the exit status.
    ;; This way, a perfectly clean run yields '0' as the exit status.
    (exit (get-count 'ko))
    ))
 
-;; (parse-command-line)
+(parse-command-line)

@@ -15,35 +15,22 @@
 ;; interface. And, the state (the parameters) that are used to
 ;; configure the run. Re-providing maintains contracts.
 (provide
-  start
-  get-count
-  report-json
-  report-csv
-  (all-from-out "state.rkt"))
+ start
+ report-json
+ report-csv
+ )
 
 ;; Logging
 (define-logger check)
 (define check-info-receiver (make-log-receiver check-logger 'info))
 
+(define PROBABLY-IMAGE
+  '(png jpg jpeg tif tiff))
+
 (define PROBABLY-NOT-HTML
   '(js png jpg jpeg css svg xml aspx json zip pdf gz ico
-                       webmanifest rss tif tiff mpg mpeg mov aiff wav avi
-                       scrbl ics pdf atom))
-
-;; PURPOSE
-;; These hashes track all URLs traversed.
-;; They end up being OK, or KO.
-(define urls:ok (make-hash))
-(define urls:ko (make-hash))
-(define urls:status (make-hash))
-
-;; PURPOSE
-;; Gets the count of good and bad URLs that were found from a run.
-(define/contract (get-count sym)
-  (-> ok/c number?)
-  (case sym
-    [(ok OK) (hash-count urls:ok)]
-    [(ko KO) (hash-count urls:ko)]))
+       webmanifest rss tif tiff mpg mpeg mov aiff wav avi
+       scrbl ics pdf atom))
 
 ;; CONTRACT
 ;; make-path :: (or list? string?) -> path/param?
@@ -70,13 +57,13 @@
 ;; elements of the URL. This is primarily used for building new URLs with new
 ;; paths (from relative anchors in a page) but using the rest of the local URL.
 (define/contract (make-url #:scheme [scheme (local:scheme)]
-                  #:user [user false]
-                  #:host [host (local:host)]
-                  #:port [port (local:port)]
-                  #:path-absolute? [path-absolute? true]
-                  #:path [path ""]
-                  #:query [query empty]
-                  #:fragment [fragment false])
+                           #:user [user false]
+                           #:host [host (local:host)]
+                           #:port [port (local:port)]
+                           #:path-absolute? [path-absolute? true]
+                           #:path [path ""]
+                           #:query [query empty]
+                           #:fragment [fragment false])
   (->* ()
        (#:scheme valid-scheme?
         #:user boolean?
@@ -94,7 +81,6 @@
 ;; fetch :: url -> xexpr
 ;; PURPOSE
 ;; Returns the content of a URL as an xexpr.
-;; FIXME: Use http-easy instead of net/url here.
 (define/contract (fetch url)
   (-> url? xexpr?)
   (log-check-info "fetching: ~a~n" url)
@@ -159,7 +145,27 @@
      ;; If all else fails, flag it, and return the base URL.
      (log-check-error (format "Cannot convert: ~s" str))
      (make-url)]))
-             
+
+(define/contract (find-alt-tag? xexpr)
+  (-> xexpr? symbol?)
+  (cond
+    [(empty? xexpr) 'MISSING]
+    [(list? (first xexpr))
+     (define left (find-alt-tag? (first xexpr)))
+     (define right (find-alt-tag? (rest xexpr)))
+     (cond
+       [(not (equal? 'MISSING left)) left]
+       [(not (equal? 'MISSING right)) right]
+       [else left])]
+        
+    [(and (member (first xexpr) '(alt ALT))
+          (> (string-length (second xexpr)) (alt-tag-length)))
+     'OK]
+    [(equal? (first xexpr) 'alt)
+     'TOOSHORT]
+    [else
+     (find-alt-tag? (rest xexpr))]))
+
 ;; CONTRACT
 ;; extract-urls :: x-expr -> (list-of url?)
 ;; PURPOSE
@@ -172,9 +178,28 @@
     [(empty? xexpr) '()]
     ;; Check anchors, CSS/JS, images...
     [(and (list? xexpr)
-          (member (first xexpr) '(a link img script)))
+          (member (first xexpr) '(a link script)))
      (define path (anchor->path xexpr))
      (log-check-info "extracted href: ~s~n" path)
+     (convert-url path)]
+    ;; Images need to be handled the same as anchors,
+    ;; but they need to be checked for alt tags, too.
+    [(and (list? xexpr)
+          (member (first xexpr) '(img)))
+     (define path (anchor->path xexpr))
+     ;; Do the alt search here.
+     (log-check-info "extracted image href: ~s~n" path)
+     (log-check-info "xexpr: ~s~n" xexpr)
+     (define key (string->symbol (url->string (convert-url (anchor->path xexpr)))))
+     (cond
+       [(equal? (find-alt-tag? xexpr) 'OK)
+        (log-check-info "ALT tag present.")
+        (alt:ok (hash-set (alt:ok) key 'OK))]
+       [else
+        (define status (find-alt-tag? xexpr))
+        (log-check-info (format "ALT tag ~a." status))
+        (alt:ko (hash-set (alt:ko) key status))])
+     ;; Still pass back the converted URL for further processing.
      (convert-url path)]
     [(list? xexpr)
      (define urls (map extract-urls xexpr))
@@ -213,7 +238,7 @@
 (define/contract (check-200? url)
   (-> url? boolean?)
   (define status-code (get-status-code url))
-  (hash-set! urls:status (string->symbol (url->string url)) status-code)
+  (urls:status (hash-set (urls:status) (string->symbol (url->string url)) status-code))
   ;; Either a 2xx response, or a status of #"OK"
   ;; Some servers response #"OK ", which is annoying.
   ;; Stick with the numerics.
@@ -228,8 +253,8 @@
 (define/contract (visited? url)
   (-> url? boolean?)
   (define key (string->symbol (url->string url)))
-  (or (hash-has-key? urls:ok key)
-      (hash-has-key? urls:ko key)))
+  (or (hash-has-key? (urls:ok) key)
+      (hash-has-key? (urls:ko) key)))
 
 ;; CONTRACT
 ;; local-url? :: url? -> boolean
@@ -254,6 +279,17 @@
                 (regexp-match (format ".*\\.~a" end)
                               (url->string url)))
               PROBABLY-NOT-HTML)))
+
+(define/contract (probably-image? url)
+  (-> url? boolean?)
+  (define found (ormap (λ (end)
+                         (regexp-match (pregexp (format ".*\\.~a$" end))
+                                       (url->string url)))
+                       PROBABLY-IMAGE))
+  ;; The ormap produces either 1) false or 2) a list.
+  ;; To get a boolean back, it needs to be a truthy value, and
+  ;; it needs to not be an empty list.
+  (and found (not (empty? found))))
 
 ;; PURPOSE
 ;; Runs the show.
@@ -281,17 +317,17 @@
                  (url->string u)))
       (cond
         [(check-200? u)
-         (hash-set! urls:ok
-                    (string->symbol (string-trim (url->string u)))
-                    u)
+         (urls:ok (hash-set (urls:ok)
+                            (string->symbol (string-trim (url->string u)))
+                            u))
          (log-check-info "--- ~a ~a ~a~n"
-                 (local-url? u)
-                 (probably-html? u)
-                 (url->string u))
+                         (local-url? u)
+                         (probably-html? u)
+                         (url->string u))
          (linkcheck u)]
-        [else (hash-set! urls:ko
-                         (string->symbol (string-trim (url->string u)))
-                         u)]
+        [else (urls:ko (hash-set (urls:ko)
+                                 (string->symbol (string-trim (url->string u)))
+                                 u))]
         ))))
   
 
@@ -306,7 +342,7 @@
                (let loop ()
                  (define v (sync check-info-receiver))
                  (printf "[ ~a ] ~a~n" (vector-ref v 0) (vector-ref v 1))
-               (loop))))))
+                 (loop))))))
   
   ;; Setup and run the checks.
   (local:scheme scheme)
@@ -315,18 +351,26 @@
   (linkcheck (make-url)))
 
 (define (report-csv)
-  (printf "url,status~n")
-  (for ([h (list urls:ko urls:ok)])
+  (printf "url,type,status~n")
+  (for ([h (list (urls:ko) (urls:ok))])
     (define keys (sort (map symbol->string (hash-keys h)) string<?))
     (for ([k keys])
-      (printf "~a,~a~n" k (hash-ref urls:status (string->symbol k))))
-    ))
+      (printf "~a,STATUS,~a~n" k (hash-ref (urls:status) (string->symbol k))))
+    )
+
+  (for ([k (sort (map symbol->string (hash-keys (alt:ko))) string<?)])
+    (printf "~a,ALT,~a~n" k (hash-ref (alt:ko) (string->symbol k))))
+  (for ([k (sort (map symbol->string (hash-keys (alt:ok))) string<?)])
+    (printf "~a,ALT,~a~n" k 'OK))
+  )
 
 (define (report-json)
   (define rept (make-hash))
-  (define urls (sort (map symbol->string (hash-keys urls:status)) string<?))
+  (define urls (sort (map symbol->string (hash-keys (urls:status))) string<?))
   (hash-set! rept 'urls urls)
-  (hash-set! rept 'response-codes urls:status)
+  (hash-set! rept 'response-codes (urls:status))
+  (hash-set! rept 'alt-ko (sort (map symbol->string (hash-keys (alt:ko))) string<?))
+  (hash-set! rept 'alt-ok (sort (map symbol->string (hash-keys (alt:ok))) string<?))
   (write-json rept))
 
 
@@ -358,4 +402,3 @@
    )
   )
 
-   
